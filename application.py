@@ -1,3 +1,1 @@
-from fastapi import FastAPI
-
-application = FastAPI()   # <-- EB expects this name
+from app.main import app as application
