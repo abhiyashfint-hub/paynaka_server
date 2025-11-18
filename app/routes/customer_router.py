@@ -1,77 +1,114 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
+"""Customer routes"""
+from fastapi import APIRouter, HTTPException, status
+from app.schemas.user_schema import (
+    CustomerCheckRequest,
+    CustomerCheckResponse,
+    CustomerRegisterRequest,
+    CustomerRegisterResponse,
+    CustomerDashboardResponse
+)
+from app.models.customer_model import Customer
+from datetime import datetime
 
-router = APIRouter()
+router = APIRouter(prefix="/customer", tags=["Customer"])
 
-# In-memory temporary database
-CUSTOMERS = {}  # phone → customer data
-ID_COUNTER = 1
+@router.post("/check", response_model=CustomerCheckResponse)
+async def check_customer(request: CustomerCheckRequest):
+    """Check if customer exists by phone number"""
+    try:
+        customer = await Customer.find_one(Customer.phone_number == request.phone_number)
+        
+        if customer:
+            return CustomerCheckResponse(
+                exists=True,
+                message="Customer found",
+                customer_id=str(customer.id)
+            )
+        else:
+            return CustomerCheckResponse(
+                exists=False,
+                message="Customer not found",
+                customer_id=None
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error checking customer: {str(e)}"
+        )
 
+@router.post("/register", response_model=CustomerRegisterResponse)
+async def register_customer(request: CustomerRegisterRequest):
+    """Register a new customer"""
+    try:
+        # Check if customer already exists
+        existing_customer = await Customer.find_one(
+            Customer.phone_number == request.phone_number
+        )
+        
+        if existing_customer:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Customer with this phone number already exists"
+            )
+        
+        # Create new customer
+        new_customer = Customer(
+            phone_number=request.phone_number,
+            name=request.name,
+            email=request.email,
+            trust_score=500,
+            credit_limit=5000.0,
+            available_credit=5000.0,
+            kyc_status="pending",
+            status="active",
+            created_at=datetime.utcnow()
+        )
+        
+        await new_customer.insert()
+        
+        return CustomerRegisterResponse(
+            success=True,
+            message="Customer registered successfully",
+            customer_id=str(new_customer.id),
+            trust_score=new_customer.trust_score,
+            credit_limit=new_customer.credit_limit
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error registering customer: {str(e)}"
+        )
 
-# --------------------------
-# SCHEMAS
-# --------------------------
-class CheckRequest(BaseModel):
-    phone: str
-    vendor_id: str
-
-
-class RegisterRequest(BaseModel):
-    name: str
-    phone: str
-    vendor_id: str
-
-
-# --------------------------
-# CHECK CUSTOMER
-# --------------------------
-@router.post("/customer/check")
-async def check_customer(payload: CheckRequest):
-    phone = payload.phone
-
-    if phone in CUSTOMERS:
-        return {
-            "exists": True,
-            "customer_id": CUSTOMERS[phone]["customer_id"]
-        }
-
-    return {"exists": False}
-
-
-# --------------------------
-# REGISTER CUSTOMER
-# --------------------------
-@router.post("/customer/register")
-async def register_customer(payload: RegisterRequest):
-    global ID_COUNTER
-
-    new_id = f"CUST-{ID_COUNTER}"
-    ID_COUNTER += 1
-
-    CUSTOMERS[payload.phone] = {
-        "customer_id": new_id,
-        "name": payload.name,
-        "vendor_id": payload.vendor_id,
-        "credit_limit": 2000,
-        "balance_remaining": 2000,
-        "outstanding": 0
-    }
-
-    return {"success": True, "customer_id": new_id}
-
-
-# --------------------------
-# DASHBOARD
-# --------------------------
-@router.get("/customer/dashboard")
-async def customer_dashboard(customer_id: str, vendor_id: str):
-    for data in CUSTOMERS.values():
-        if data["customer_id"] == customer_id:
-            return {
-                "name": data["name"],
-                "credit_limit": data["credit_limit"],
-                "balance_remaining": data["balance_remaining"],
-                "outstanding": data["outstanding"]
-            }
-
-    return {"error": "Customer not found"}
+@router.get("/dashboard/{customer_id}", response_model=CustomerDashboardResponse)
+async def get_customer_dashboard(customer_id: str):
+    """Get customer dashboard data"""
+    try:
+        customer = await Customer.get(customer_id)
+        
+        if not customer:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Customer not found"
+            )
+        
+        return CustomerDashboardResponse(
+            customer_id=str(customer.id),
+            name=customer.name,
+            phone_number=customer.phone_number,
+            trust_score=customer.trust_score,
+            credit_limit=customer.credit_limit,
+            available_credit=customer.available_credit,
+            kyc_status=customer.kyc_status,
+            status=customer.status
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching dashboard: {str(e)}"
+        )

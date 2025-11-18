@@ -1,1 +1,1 @@
-from .customer_model import Customer
+"""Database models"""
