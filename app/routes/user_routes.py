@@ -1,117 +1,164 @@
-# ============ TRUST SCORE CALCULATION ============
+# app/routes/user_routes.py
 
-async def calculate_trust_score(customer_id: str, vendor_id: str) -> int:
+from fastapi import APIRouter, HTTPException
+from fastapi import Depends
+from datetime import datetime
+from typing import Optional
+from app.core.database import get_database
+
+router = APIRouter(prefix="/users", tags=["Users"])
+
+
+# Dependency to get DB
+def db():
+    return get_database()
+
+
+# =========================================
+#         CREATE / REGISTER USER
+# =========================================
+@router.post("/register")
+async def register_user(data: dict, database=Depends(db)):
     """
-    Calculate trust score based on:
-    - Repayment history (40%)
-    - Network reputation (30%)
-    - Transaction velocity (20%)
-    - Account tenure (10%)
+    Register a new user (name, phone, profile info)
     """
-    try:
-        relation = await db.customer_vendor_relations.find_one({
-            "customer_id": customer_id,
-            "vendor_id": vendor_id
-        })
-        
-        if not relation:
-            return 500  # Default score for new customers
-        
-        # Component 1: Repayment History (40%)
-        total_payments = relation["on_time_payments"] + relation["late_payments"]
-        if total_payments > 0:
-            on_time_rate = relation["on_time_payments"] / total_payments
-        else:
-            on_time_rate = 1.0  # No history yet
-        
-        repayment_score = on_time_rate * 40
-        
-        # Component 2: Network Reputation (30%)
-        # Count vendors who trust this customer
-        all_relations = await db.customer_vendor_relations.count_documents({
-            "customer_phone": relation["customer_phone"],
-            "status": "active"
-        })
-        network_score = min(all_relations / 10, 1.0) * 30
-        
-        # Component 3: Transaction Velocity (20%)
-        # Active customers get higher scores
-        transaction_count = relation["transaction_count"]
-        velocity_score = min(transaction_count / 50, 1.0) * 20
-        
-        # Component 4: Account Tenure (10%)
-        # Older accounts get higher scores
-        account_age_days = (datetime.utcnow() - relation["created_at"]).days
-        tenure_score = min(account_age_days / 365, 1.0) * 10
-        
-        # Calculate raw score (0-100)
-        raw_score = repayment_score + network_score + velocity_score + tenure_score
-        
-        # Convert to 300-1000 scale
-        final_score = int(300 + (raw_score / 100) * 700)
-        
-        # Apply bonuses/penalties
-        if relation["on_time_payments"] >= 10 and relation["late_payments"] == 0:
-            final_score += 100  # Perfect payment record bonus
-        
-        if relation["late_payments"] > 3:
-            final_score -= 50  # Multiple late payments penalty
-        
-        if relation["default_count"] > 0:
-            final_score -= 100 * relation["default_count"]  # Default penalty
-        
-        # Clamp between 300-1000
-        final_score = max(300, min(1000, final_score))
-        
-        # Update in database
-        await db.customer_vendor_relations.update_one(
-            {"_id": relation["_id"]},
-            {
-                "$set": {
-                    "trust_score": final_score,
-                    "updated_at": datetime.utcnow()
-                },
-                "$push": {
-                    "trust_score_history": {
-                        "score": final_score,
-                        "calculated_at": datetime.utcnow()
-                    }
+    phone = data.get("phone")
+    name = data.get("name")
+
+    if not phone or not name:
+        raise HTTPException(status_code=400, detail="Name & phone required")
+
+    existing = await database["users"].find_one({"phone": phone})
+    if existing:
+        raise HTTPException(status_code=400, detail="User already exists")
+
+    user_data = {
+        "name": name,
+        "phone": phone,
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+        "trust_score": 500,
+    }
+
+    result = await database["users"].insert_one(user_data)
+    return {
+        "success": True,
+        "message": "User registered",
+        "user_id": str(result.inserted_id),
+    }
+
+
+# =========================================
+#            GET USER PROFILE
+# =========================================
+@router.get("/{phone}")
+async def get_user(phone: str, database=Depends(db)):
+    user = await database["users"].find_one({"phone": phone})
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user["_id"] = str(user["_id"])  # convert ObjectId
+
+    return {
+        "success": True,
+        "user": user
+    }
+
+
+# =====================================================
+#               TRUST SCORE CALCULATION
+# =====================================================
+async def calculate_trust_score(customer_id: str, vendor_id: str, database):
+    """
+    Internal function — not an API endpoint.
+    Calculates trust score (300–1000)
+    """
+
+    relation = await database["customer_vendor_relations"].find_one({
+        "customer_id": customer_id,
+        "vendor_id": vendor_id
+    })
+
+    if not relation:
+        return 500  # No history
+
+    # Repayment: 40%
+    total = relation.get("on_time_payments", 0) + relation.get("late_payments", 0)
+    on_time_rate = relation.get("on_time_payments", 0) / total if total > 0 else 1
+    repayment_score = on_time_rate * 40
+
+    # Network reputation: 30%
+    network_relations = await database["customer_vendor_relations"].count_documents({
+        "customer_phone": relation.get("customer_phone"),
+        "status": "active"
+    })
+    network_score = min(network_relations / 10, 1) * 30
+
+    # Transaction velocity: 20%
+    txn_count = relation.get("transaction_count", 0)
+    velocity_score = min(txn_count / 50, 1) * 20
+
+    # Account tenure: 10%
+    age_days = (datetime.utcnow() - relation.get("created_at", datetime.utcnow())).days
+    tenure_score = min(age_days / 365, 1) * 10
+
+    raw = repayment_score + network_score + velocity_score + tenure_score
+    final_score = int(300 + (raw / 100) * 700)
+
+    # Penalties / bonuses
+    if relation.get("on_time_payments", 0) >= 10 and relation.get("late_payments", 0) == 0:
+        final_score += 100
+
+    if relation.get("late_payments", 0) > 3:
+        final_score -= 50
+
+    if relation.get("default_count", 0) > 0:
+        final_score -= 100 * relation.get("default_count", 0)
+
+    final_score = max(300, min(1000, final_score))
+
+    # Update DB
+    await database["customer_vendor_relations"].update_one(
+        {"_id": relation["_id"]},
+        {
+            "$set": {"trust_score": final_score, "updated_at": datetime.utcnow()},
+            "$push": {
+                "trust_score_history": {
+                    "score": final_score,
+                    "calculated_at": datetime.utcnow()
                 }
             }
-        )
-        
-        return final_score
-        
-    except Exception as e:
-        print(f"Error calculating trust score: {e}")
-        return 500  # Default on error
+        }
+    )
 
-# ============ LOCATION VERIFICATION ============
+    return final_score
 
-def verify_location(customer_location: dict, vendor_location: dict) -> dict:
-    """Verify customer is within 500m of vendor"""
+
+# =====================================================
+#               LOCATION VERIFICATION
+# =====================================================
+def verify_location(customer_loc: dict, vendor_loc: dict):
+    """
+    Internal function to verify customer is within 500 meters.
+    """
+
     try:
         from geopy.distance import geodesic
-        
-        customer_coords = (
-            customer_location.get("latitude"),
-            customer_location.get("longitude")
-        )
-        vendor_coords = (
-            vendor_location.get("latitude"),
-            vendor_location.get("longitude")
-        )
-        
-        distance_km = geodesic(customer_coords, vendor_coords).kilometers
-        
+
+        c = (customer_loc["latitude"], customer_loc["longitude"])
+        v = (vendor_loc["latitude"], vendor_loc["longitude"])
+
+        distance_km = geodesic(c, v).kilometers
+
         return {
-            "verified": distance_km <= 0.5,  # 500 meters
-            "distance_km": round(distance_km, 3),
-            "message": "Location verified" if distance_km <= 0.5 else "Too far from vendor"
+            "verified": distance_km <= 0.5,
+            "distance_km": round(distance_km, 3)
         }
+
     except Exception as e:
         return {
             "verified": False,
             "distance_km": 0,
-            "message": f"Location verification failed: {str(e)}"
+            "error": str(e)
         }

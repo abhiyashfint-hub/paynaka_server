@@ -1,49 +1,58 @@
 """
 Paynaka FastAPI Application
-Main application file that initializes FastAPI, CORS, routes, and database
 """
+
+import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-import logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Routers (correct imports)
+from app.routes.health_routes import router as health_routes
+from app.routes.customer_router import router as customer_router
+from app.routes.auth_router import router as auth_router
+from app.routes.vendor_routes import router as vendor_router
+from app.routes.user_routes import router as user_router
+from app.routes.qr_routes import router as qr_routes
 
-# Import database connection
+# DB + Settings
 from app.core.database import connect_to_mongo, close_mongo_connection
 from app.core.config import settings
 
-# Import routers
-from app.routes import health_routes
-from app.routes import customer_router
-from app.routes import auth_router
-from app.routes import vendor_router
 
+# -------------------------------
+# Logging
+# -------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+# -------------------------------
+# Lifespan Events
+# -------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup and shutdown events"""
-    # Startup
     logger.info("🚀 Starting Paynaka Backend...")
     try:
         await connect_to_mongo()
-        logger.info("✅ Application started successfully")
+        logger.info("✅ Connected to MongoDB")
     except Exception as e:
         logger.error(f"❌ Startup failed: {e}")
         raise
-    
+
     yield
-    
-    # Shutdown
+
     logger.info("🛑 Shutting down Paynaka Backend...")
     await close_mongo_connection()
-    logger.info("✅ Application shut down successfully")
+    logger.info("✅ MongoDB connection closed")
 
-# Create FastAPI app with lifespan
+
+# -------------------------------
+# FastAPI App
+# -------------------------------
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
@@ -53,7 +62,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Configure CORS
+
+# -------------------------------
+# CORS
+# -------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -62,24 +74,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(health_routes.router, prefix="/api/v1")
-app.include_router(customer_router.router, prefix="/api/v1")
-app.include_router(auth_router.router, prefix="/api/v1")
-app.include_router(vendor_router.router, prefix="/api/v1")
 
-# Root endpoint (also in health_routes, but duplicated here for clarity)
+# -------------------------------
+# Routers
+# -------------------------------
+app.include_router(health_routes, prefix="/api/v1")
+app.include_router(customer_router, prefix="/api/v1")
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(vendor_router, prefix="/api/v1")
+app.include_router(user_router, prefix="/api/v1")
+app.include_router(qr_routes, prefix="/api/v1")      # QR routes
+
+
+# -------------------------------
+# Default Root Route
+# -------------------------------
 @app.get("/")
 async def root():
-    """Root endpoint - confirms API is running"""
     return {
         "message": "Paynaka Backend Running",
         "version": settings.APP_VERSION,
         "status": "operational",
-        "docs": "/docs",
-        "health": "/api/v1/health"
+        "docs": "/docs"
     }
 
+
+# -------------------------------
+# Development Entry
+# -------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
@@ -88,7 +110,3 @@ if __name__ == "__main__":
         port=8000,
         reload=True
     )
-from app.routes import qr_routes  # Add this import
-
-# Include QR router
-app.include_router(qr_routes.router, prefix="/api/v1")
